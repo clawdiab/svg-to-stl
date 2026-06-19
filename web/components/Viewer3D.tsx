@@ -209,7 +209,7 @@ export default function Viewer3D({ svgContent, embossed, depth, size }: Props) {
       <div className="flex-1" style={{ minHeight: 500 }}>
         <Canvas
           shadows
-          camera={{ position: [0, 60, 80], fov: 40 }}
+          camera={{ position: [0, 30, 50], fov: 50 }}
           gl={{ antialias: true }}
         >
           <color attach="background" args={["#0f172a"]} />

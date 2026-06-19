@@ -1,119 +1,137 @@
 /**
  * Generate 3D geometry for the fidget clicker parts
- * All dimensions in mm, geometry as Three.js BufferGeometry
+ * Units: mm. Y-up coordinate system.
  */
 
 import * as THREE from "three";
 import { CHERRY_MX, CLICKER } from "./dimensions";
 import { Vec2, parseSvgPath, extractSvgPaths, getSvgViewBox, computeBounds } from "./svgParser";
 
-const SEGMENTS = 64;
+const SEG = 64;
 
-/**
- * Merge multiple BufferGeometries into one (no CSG, additive only)
- */
+/** Merge multiple geometries into one */
 function mergeGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const valid = geos.filter(g => g.attributes.position?.count > 0);
   if (valid.length === 0) return new THREE.BufferGeometry();
-  if (valid.length === 1) return valid[0];
+  if (valid.length === 1) {
+    const g = valid[0].clone();
+    g.computeVertexNormals();
+    return g;
+  }
+
+  // Convert all to non-indexed first
+  const nonIndexed = valid.map(g => g.toNonIndexed());
 
   let totalVerts = 0;
-  let totalIdx = 0;
-  for (const g of valid) {
-    totalVerts += g.attributes.position.count;
-    totalIdx += g.index ? g.index.count : g.attributes.position.count;
-  }
+  for (const g of nonIndexed) totalVerts += g.attributes.position.count;
 
   const pos = new Float32Array(totalVerts * 3);
   const nor = new Float32Array(totalVerts * 3);
-  const idx = new Uint32Array(totalIdx);
 
-  let vOff = 0, iOff = 0;
-  for (const g of valid) {
+  let off = 0;
+  for (const g of nonIndexed) {
     const p = g.attributes.position;
     const n = g.attributes.normal;
-    pos.set(p.array as Float32Array, vOff * 3);
-    if (n) nor.set(n.array as Float32Array, vOff * 3);
-
-    if (g.index) {
-      for (let i = 0; i < g.index.count; i++) idx[iOff + i] = g.index.array[i] + vOff;
-      iOff += g.index.count;
-    } else {
-      for (let i = 0; i < p.count; i++) idx[iOff + i] = vOff + i;
-      iOff += p.count;
-    }
-    vOff += p.count;
+    for (let i = 0; i < p.count * 3; i++) pos[off * 3 + i] = (p.array as Float32Array)[i];
+    if (n) for (let i = 0; i < n.count * 3; i++) nor[off * 3 + i] = (n.array as Float32Array)[i];
+    off += p.count;
   }
 
   const out = new THREE.BufferGeometry();
   out.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   out.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
-  out.setIndex(new THREE.BufferAttribute(idx, 1));
   out.computeVertexNormals();
   return out;
 }
 
 /**
- * Create base geometry — cylindrical shell with flat bottom
- * Y-up, centred at world origin, extends from -BASE_HEIGHT/2 to +BASE_HEIGHT/2
+ * Base: outer cylinder shell + bottom plate + Cherry MX socket frame
+ * Centered at Y=0, extends ±BASE_HEIGHT/2 on Y axis
  */
 export function createBaseGeometry(diameter: number): THREE.BufferGeometry {
   const outerR = diameter / 2;
   const innerR = outerR - CLICKER.BASE_WALL;
   const H = CLICKER.BASE_HEIGHT;
   const botH = CLICKER.BASE_BOTTOM;
+  const geos: THREE.BufferGeometry[] = [];
 
-  // Outer wall
-  const outerTop    = new THREE.CylinderGeometry(outerR, outerR, H, SEGMENTS, 1, false);
-  // Inner cavity (open top) — we subtract visually by NOT drawing it; instead draw the shell
-  // Shell ring
-  const ring = new THREE.CylinderGeometry(outerR, outerR, H, SEGMENTS, 1, true); // open cylinder
-  // Top annular cap (ring at top)
-  const topCap = new THREE.RingGeometry(innerR, outerR, SEGMENTS);
-  topCap.rotateX(-Math.PI / 2);
-  topCap.translate(0, H / 2, 0);
-  // Bottom full disc (with socket hole approximated visually)
-  const bottomDisc = new THREE.CylinderGeometry(outerR, outerR, botH, SEGMENTS, 1, false);
-  bottomDisc.translate(0, -H / 2 + botH / 2, 0);
+  // Outer wall (open cylinder)
+  const outerWall = new THREE.CylinderGeometry(outerR, outerR, H, SEG, 1, true);
+  geos.push(outerWall);
 
-  // Inner wall surface
-  const innerWall = new THREE.CylinderGeometry(innerR, innerR, H - botH, SEGMENTS, 1, true);
+  // Top annular cap
+  const topRing = new THREE.CylinderGeometry(outerR, innerR, 0.01, SEG, 1, false);
+  topRing.translate(0, H / 2, 0);
+  // Use a ring shape extruded flat
+  const topShape = new THREE.Shape();
+  topShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const topHole = new THREE.Path();
+  topHole.absarc(0, 0, innerR, 0, Math.PI * 2, true);
+  topShape.holes.push(topHole);
+  const topCapGeo = new THREE.ShapeGeometry(topShape, SEG);
+  topCapGeo.rotateX(-Math.PI / 2);
+  topCapGeo.translate(0, H / 2, 0);
+  geos.push(topCapGeo);
+
+  // Bottom full disc
+  const botShape = new THREE.Shape();
+  botShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const botGeo = new THREE.ShapeGeometry(botShape, SEG);
+  botGeo.rotateX(Math.PI / 2); // face down
+  botGeo.translate(0, -H / 2, 0);
+  geos.push(botGeo);
+
+  // Bottom inner disc (top of bottom plate)
+  const botInnerShape = new THREE.Shape();
+  botInnerShape.absarc(0, 0, innerR, 0, Math.PI * 2, false);
+  // Cherry MX socket hole cutout (visual — square)
+  const halfH = CHERRY_MX.PLATE_HOLE / 2;
+  const socketPath = new THREE.Path();
+  socketPath.moveTo(-halfH, -halfH);
+  socketPath.lineTo(halfH, -halfH);
+  socketPath.lineTo(halfH, halfH);
+  socketPath.lineTo(-halfH, halfH);
+  socketPath.closePath();
+  botInnerShape.holes.push(socketPath);
+  const botInnerGeo = new THREE.ShapeGeometry(botInnerShape, SEG);
+  botInnerGeo.rotateX(-Math.PI / 2);
+  botInnerGeo.translate(0, -H / 2 + botH, 0);
+  geos.push(botInnerGeo);
+
+  // Inner wall (open)
+  const innerWall = new THREE.CylinderGeometry(innerR, innerR, H - botH, SEG, 1, true);
   innerWall.translate(0, botH / 2, 0);
+  geos.push(innerWall);
 
-  // Cherry MX socket indicator — a raised square frame on the bottom inner face
-  const halfHole = CHERRY_MX.PLATE_HOLE / 2;
-  const socketFrameGeos: THREE.BufferGeometry[] = [];
-  // 4 walls of the socket frame
-  const wallThick = 1.0;
-  const wallH = 2.0;
-  const wallY = -H / 2 + botH + wallH / 2;
-
-  // Front & back walls
-  for (const sign of [-1, 1]) {
-    const w = new THREE.BoxGeometry(CHERRY_MX.PLATE_HOLE + wallThick * 2, wallH, wallThick);
-    w.translate(0, wallY, sign * (halfHole + wallThick / 2));
-    socketFrameGeos.push(w);
-  }
-  // Left & right walls
-  for (const sign of [-1, 1]) {
-    const w = new THREE.BoxGeometry(wallThick, wallH, CHERRY_MX.PLATE_HOLE);
-    w.translate(sign * (halfHole + wallThick / 2), wallY, 0);
-    socketFrameGeos.push(w);
+  // Socket frame walls (4 box sides)
+  const fw = CHERRY_MX.PLATE_HOLE;
+  const fwH = 2.5;
+  const ft = 1.0;
+  const fy = -H / 2 + botH + fwH / 2;
+  for (const [w, d, tx, tz] of [
+    [fw + ft * 2, ft, 0, -(fw / 2 + ft / 2)],
+    [fw + ft * 2, ft, 0, fw / 2 + ft / 2],
+    [ft, fw, -(fw / 2 + ft / 2), 0],
+    [ft, fw, fw / 2 + ft / 2, 0],
+  ] as [number, number, number, number][]) {
+    const box = new THREE.BoxGeometry(w, fwH, d);
+    box.translate(tx, fy, tz);
+    geos.push(box);
   }
 
-  // Pin holes (visual cylinders inside socket)
-  const pin1 = new THREE.CylinderGeometry(0.8, 0.8, wallH, 12);
-  pin1.translate(CHERRY_MX.PIN_1.x, wallY, CHERRY_MX.PIN_1.y);
-  const pin2 = new THREE.CylinderGeometry(0.8, 0.8, wallH, 12);
-  pin2.translate(CHERRY_MX.PIN_2.x, wallY, CHERRY_MX.PIN_2.y);
+  // Pin cylinders
+  for (const pin of [CHERRY_MX.PIN_1, CHERRY_MX.PIN_2]) {
+    const cyl = new THREE.CylinderGeometry(0.75, 0.75, fwH, 12);
+    cyl.translate(pin.x, fy, pin.y);
+    geos.push(cyl);
+  }
 
-  const allGeos = [ring, topCap, bottomDisc, innerWall, ...socketFrameGeos, pin1, pin2];
-  return mergeGeos(allGeos);
+  return mergeGeos(geos);
 }
 
 /**
- * Create top cap geometry with SVG design on top face
- * Y-up, centred at world origin
+ * Top cap: disc + lip ring + stem receiver + SVG design
+ * Centered at Y=0
  */
 export function createTopCapGeometry(
   svgContent: string,
@@ -122,80 +140,60 @@ export function createTopCapGeometry(
   embossed: boolean
 ): THREE.BufferGeometry {
   const outerR = diameter / 2 - CLICKER.BASE_WALL - CLICKER.CAP_CLEARANCE;
-  const lipR   = outerR - 1.0;
-  const H      = CLICKER.CAP_THICKNESS;
-  const lipH   = CLICKER.CAP_LIP;
-
-  // Main disc
-  const disc = new THREE.CylinderGeometry(outerR, outerR, H, SEGMENTS, 1, false);
-
-  // Lip ring (goes inside the base)
-  const lip = new THREE.CylinderGeometry(lipR, lipR, lipH, SEGMENTS, 1, true);
-  lip.translate(0, -(H / 2 + lipH / 2), 0);
-
-  // Lip top/bottom caps
-  const lipTop = new THREE.RingGeometry(lipR - 1, lipR, SEGMENTS);
-  lipTop.rotateX(-Math.PI / 2);
-  lipTop.translate(0, -(H / 2), 0);
-  const lipBot = new THREE.RingGeometry(lipR - 1, lipR, SEGMENTS);
-  lipBot.rotateX(-Math.PI / 2);
-  lipBot.translate(0, -(H / 2 + lipH), 0);
-  // lip inner floor
-  const lipFloor = new THREE.CircleGeometry(lipR - 1, SEGMENTS);
-  lipFloor.rotateX(-Math.PI / 2);
-  lipFloor.translate(0, -(H / 2 + lipH), 0);
-
-  // Cross stem receiver
-  const stemGeos = createStemReceiverGeos(H, lipH);
-
-  // SVG design
-  const designGeos = createDesignGeos(svgContent, outerR, H, designDepth, embossed);
-
-  const allGeos = [disc, lip, lipTop, lipBot, lipFloor, ...stemGeos, ...designGeos];
-  return mergeGeos(allGeos);
-}
-
-/**
- * Cross-shaped stem receiver (Cherry MX cross slot)
- */
-function createStemReceiverGeos(capH: number, lipH: number): THREE.BufferGeometry[] {
-  const { STEM_WIDTH, STEM_THICKNESS } = CHERRY_MX;
-  const receiverH = CLICKER.STEM_RECEIVER_DEPTH;
-  const wall = 1.0;
-  const baseY = -(capH / 2 + lipH + receiverH / 2);
-
+  const lipR = outerR - 1.2;
+  const H = CLICKER.CAP_THICKNESS;
+  const lipH = CLICKER.CAP_LIP;
   const geos: THREE.BufferGeometry[] = [];
 
-  // Outer cross bounding box (solid)
+  // Main disc (solid cylinder)
+  const disc = new THREE.CylinderGeometry(outerR, outerR, H, SEG, 1, false);
+  geos.push(disc);
+
+  // Lip ring (open cylinder, hangs below disc)
+  const lipWall = new THREE.CylinderGeometry(lipR, lipR, lipH, SEG, 1, true);
+  lipWall.translate(0, -(H / 2 + lipH / 2), 0);
+  geos.push(lipWall);
+
+  // Lip annular top (connects disc bottom to lip)
+  const lipTopShape = new THREE.Shape();
+  lipTopShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const lipTopHole = new THREE.Path();
+  lipTopHole.absarc(0, 0, lipR, 0, Math.PI * 2, true);
+  lipTopShape.holes.push(lipTopHole);
+  const lipTopGeo = new THREE.ShapeGeometry(lipTopShape, SEG);
+  lipTopGeo.rotateX(Math.PI / 2); // face down
+  lipTopGeo.translate(0, -H / 2, 0);
+  geos.push(lipTopGeo);
+
+  // Lip bottom disc
+  const lipBotShape = new THREE.Shape();
+  lipBotShape.absarc(0, 0, lipR, 0, Math.PI * 2, false);
+  const lipBotGeo = new THREE.ShapeGeometry(lipBotShape, SEG);
+  lipBotGeo.rotateX(Math.PI / 2);
+  lipBotGeo.translate(0, -(H / 2 + lipH), 0);
+  geos.push(lipBotGeo);
+
+  // Stem receiver block
+  const { STEM_WIDTH, STEM_THICKNESS } = CHERRY_MX;
+  const recH = CLICKER.STEM_RECEIVER_DEPTH;
+  const wall = 1.0;
+  const recY = -(H / 2 + lipH + recH / 2);
   const outerW = STEM_WIDTH + wall * 2;
-  const outer = new THREE.BoxGeometry(outerW, receiverH, outerW);
-  outer.translate(0, baseY, 0);
-  geos.push(outer);
 
-  // Punch out cross slot visually (just show the walls by adding inner pieces)
-  // Horizontal arm of cross (slot cutout represented as void — skip for additive preview)
-  // Instead: show the 4 corner blocks that form around the cross
-  const cornerW = (outerW - STEM_THICKNESS) / 2;
-  const cornerD = (outerW - STEM_THICKNESS) / 2;
+  // Solid outer block
+  const stemBlock = new THREE.BoxGeometry(outerW, recH, outerW);
+  stemBlock.translate(0, recY, 0);
+  geos.push(stemBlock);
 
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      const corner = new THREE.BoxGeometry(cornerW, receiverH, cornerD);
-      corner.translate(
-        sx * (STEM_THICKNESS / 2 + cornerW / 2),
-        baseY,
-        sz * (STEM_THICKNESS / 2 + cornerD / 2)
-      );
-      // Remove (subtract) — since we can't do CSG, just skip; outer box gives visual
-    }
-  }
+  // SVG design on top face
+  const designGeos = svgContent
+    ? createDesignGeos(svgContent, outerR, H, designDepth, embossed)
+    : [];
+  geos.push(...designGeos);
 
-  return geos;
+  return mergeGeos(geos);
 }
 
-/**
- * Extrude SVG design onto the top face of the cap
- */
 function createDesignGeos(
   svgContent: string,
   capRadius: number,
@@ -205,65 +203,39 @@ function createDesignGeos(
 ): THREE.BufferGeometry[] {
   try {
     const pathData = extractSvgPaths(svgContent);
-    if (pathData.length === 0) return [];
+    if (!pathData.length) return [];
 
     const allContours: Vec2[][] = [];
-    for (const { d } of pathData) {
-      allContours.push(...parseSvgPath(d));
-    }
-    if (allContours.length === 0) return [];
+    for (const { d } of pathData) allContours.push(...parseSvgPath(d));
+    if (!allContours.length) return [];
 
     const bounds = computeBounds(allContours);
     const svgW = bounds.maxX - bounds.minX;
     const svgH = bounds.maxY - bounds.minY;
-    if (svgW === 0 || svgH === 0) return [];
+    if (!svgW || !svgH) return [];
 
-    const targetSize = capRadius * 2 * 0.7;
+    const targetSize = capRadius * 2 * 0.72;
     const scale = targetSize / Math.max(svgW, svgH);
     const cx = (bounds.minX + bounds.maxX) / 2;
     const cy = (bounds.minY + bounds.maxY) / 2;
 
     const geos: THREE.BufferGeometry[] = [];
-
     for (const contour of allContours) {
       if (contour.length < 3) continue;
-
-      const shape = new THREE.Shape();
-      shape.moveTo(
-        (contour[0].x - cx) * scale,
-        -(contour[0].y - cy) * scale
+      const shape = new THREE.Shape(
+        contour.map(p => new THREE.Vector2((p.x - cx) * scale, -(p.y - cy) * scale))
       );
-      for (let i = 1; i < contour.length; i++) {
-        shape.lineTo((contour[i].x - cx) * scale, -(contour[i].y - cy) * scale);
-      }
-      shape.closePath();
-
       const area = Math.abs(THREE.ShapeUtils.area(shape.getPoints()));
-      if (area < 0.01) continue;
+      if (area < 0.1) continue;
 
       try {
-        const extruded = new THREE.ExtrudeGeometry(shape, {
-          depth: designDepth,
-          bevelEnabled: false,
-        });
-
-        // Rotate from XY plane to XZ (top face)
+        const extruded = new THREE.ExtrudeGeometry(shape, { depth: designDepth, bevelEnabled: false });
         extruded.rotateX(-Math.PI / 2);
-
-        // Position: embossed = on top of cap, sunken = recessed into cap top
-        const topFace = capH / 2;
-        if (embossed) {
-          extruded.translate(0, topFace, 0);
-        } else {
-          extruded.translate(0, topFace - designDepth, 0);
-        }
-
+        const topY = capH / 2;
+        extruded.translate(0, embossed ? topY : topY - designDepth, 0);
         geos.push(extruded);
-      } catch {
-        // skip bad shapes
-      }
+      } catch { /* skip */ }
     }
-
     return geos;
   } catch {
     return [];
@@ -271,40 +243,33 @@ function createDesignGeos(
 }
 
 /**
- * Export a BufferGeometry as binary STL ArrayBuffer
+ * Export geometry as binary STL
  */
 export function geometryToSTL(geometry: THREE.BufferGeometry): ArrayBuffer {
   const geo = geometry.toNonIndexed();
   geo.computeVertexNormals();
-  const posAttr = geo.attributes.position;
-  const norAttr = geo.attributes.normal;
-  const numTris = posAttr.count / 3;
+  const pos = geo.attributes.position;
+  const nor = geo.attributes.normal;
+  const numTris = pos.count / 3;
 
   const buf = new ArrayBuffer(80 + 4 + numTris * 50);
   const view = new DataView(buf);
-
   const header = "SVG-to-STL Fidget Clicker";
   for (let i = 0; i < 80; i++) view.setUint8(i, i < header.length ? header.charCodeAt(i) : 0);
   view.setUint32(80, numTris, true);
 
   let off = 84;
   for (let i = 0; i < numTris; i++) {
-    const base = i * 3;
-    // Normal (averaged from 3 vertices)
-    const nx = (norAttr.getX(base) + norAttr.getX(base + 1) + norAttr.getX(base + 2)) / 3;
-    const ny = (norAttr.getY(base) + norAttr.getY(base + 1) + norAttr.getY(base + 2)) / 3;
-    const nz = (norAttr.getZ(base) + norAttr.getZ(base + 1) + norAttr.getZ(base + 2)) / 3;
-    view.setFloat32(off, nx, true); off += 4;
-    view.setFloat32(off, ny, true); off += 4;
-    view.setFloat32(off, nz, true); off += 4;
-
+    const b = i * 3;
+    view.setFloat32(off, nor.getX(b), true); off += 4;
+    view.setFloat32(off, nor.getY(b), true); off += 4;
+    view.setFloat32(off, nor.getZ(b), true); off += 4;
     for (let j = 0; j < 3; j++) {
-      view.setFloat32(off, posAttr.getX(base + j), true); off += 4;
-      view.setFloat32(off, posAttr.getY(base + j), true); off += 4;
-      view.setFloat32(off, posAttr.getZ(base + j), true); off += 4;
+      view.setFloat32(off, pos.getX(b + j), true); off += 4;
+      view.setFloat32(off, pos.getY(b + j), true); off += 4;
+      view.setFloat32(off, pos.getZ(b + j), true); off += 4;
     }
     view.setUint16(off, 0, true); off += 2;
   }
-
   return buf;
 }
