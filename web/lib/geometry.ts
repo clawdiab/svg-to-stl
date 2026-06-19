@@ -45,86 +45,89 @@ function mergeGeos(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
 }
 
 /**
- * Base: outer cylinder shell + bottom plate + Cherry MX socket frame
+ * Base: solid cylinder with a switch pocket cut from the top.
+ * The base is a solid disc with:
+ *  - Outer body: full solid cylinder
+ *  - Socket pocket: rectangular recess from the top for the MX switch
+ *  - Pin holes: small cylindrical voids for switch pins (bottom)
+ *
  * Centered at Y=0, extends ±BASE_HEIGHT/2 on Y axis
  */
 export function createBaseGeometry(diameter: number): THREE.BufferGeometry {
   const outerR = diameter / 2;
-  const innerR = outerR - CLICKER.BASE_WALL;
   const H = CLICKER.BASE_HEIGHT;
   const botH = CLICKER.BASE_BOTTOM;
+  const pocketDepth = H - botH; // depth of the switch pocket from top
+  const halfH = CHERRY_MX.PLATE_HOLE / 2;
   const geos: THREE.BufferGeometry[] = [];
 
-  // Outer wall (open cylinder)
-  const outerWall = new THREE.CylinderGeometry(outerR, outerR, H, SEG, 1, true);
-  geos.push(outerWall);
+  // 1. Solid base cylinder (the main body)
+  // Use ExtrudeGeometry from a circle shape with square hole for the pocket
+  // Actually simpler: solid cylinder + pocket walls
 
-  // Top annular cap
-  const topRing = new THREE.CylinderGeometry(outerR, innerR, 0.01, SEG, 1, false);
-  topRing.translate(0, H / 2, 0);
-  // Use a ring shape extruded flat
-  const topShape = new THREE.Shape();
-  topShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
-  const topHole = new THREE.Path();
-  topHole.absarc(0, 0, innerR, 0, Math.PI * 2, true);
-  topShape.holes.push(topHole);
-  const topCapGeo = new THREE.ShapeGeometry(topShape, SEG);
-  topCapGeo.rotateX(-Math.PI / 2);
-  topCapGeo.translate(0, H / 2, 0);
-  geos.push(topCapGeo);
+  // Bottom solid disc (full circle, closed)
+  const baseCyl = new THREE.CylinderGeometry(outerR, outerR, botH, SEG, 1, false);
+  baseCyl.translate(0, -H / 2 + botH / 2, 0);
+  geos.push(baseCyl);
 
-  // Bottom full disc
-  const botShape = new THREE.Shape();
-  botShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
-  const botGeo = new THREE.ShapeGeometry(botShape, SEG);
-  botGeo.rotateX(Math.PI / 2); // face down
-  botGeo.translate(0, -H / 2, 0);
-  geos.push(botGeo);
+  // 2. Outer wall ring from bottom plate to top
+  // This is the cylindrical wall around the pocket
+  // Create as a shape (annular ring) extruded upward
+  const wallShape = new THREE.Shape();
+  wallShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const pocketHole = new THREE.Path();
+  pocketHole.absarc(0, 0, outerR - CLICKER.BASE_WALL, 0, Math.PI * 2, true);
+  wallShape.holes.push(pocketHole);
+  const wallGeo = new THREE.ExtrudeGeometry(wallShape, {
+    depth: pocketDepth,
+    bevelEnabled: false,
+  });
+  wallGeo.rotateX(-Math.PI / 2);
+  wallGeo.translate(0, -H / 2 + botH, 0);
+  geos.push(wallGeo);
 
-  // Bottom inner disc (top of bottom plate)
-  const botInnerShape = new THREE.Shape();
-  botInnerShape.absarc(0, 0, innerR, 0, Math.PI * 2, false);
-  // Cherry MX socket hole cutout (visual — square)
-  const halfH = CHERRY_MX.PLATE_HOLE / 2;
-  const socketPath = new THREE.Path();
-  socketPath.moveTo(-halfH, -halfH);
-  socketPath.lineTo(halfH, -halfH);
-  socketPath.lineTo(halfH, halfH);
-  socketPath.lineTo(-halfH, halfH);
-  socketPath.closePath();
-  botInnerShape.holes.push(socketPath);
-  const botInnerGeo = new THREE.ShapeGeometry(botInnerShape, SEG);
-  botInnerGeo.rotateX(-Math.PI / 2);
-  botInnerGeo.translate(0, -H / 2 + botH, 0);
-  geos.push(botInnerGeo);
+  // 3. Socket frame (raised platform inside pocket with 14mm square hole)
+  // This is the "plate" that holds the switch — an annular platform inside the pocket
+  // It sits at the top of the pocket (flush with top of base)
+  const plateH = CHERRY_MX.PLATE_THICKNESS;
+  const innerR = outerR - CLICKER.BASE_WALL;
 
-  // Inner wall (open)
-  const innerWall = new THREE.CylinderGeometry(innerR, innerR, H - botH, SEG, 1, true);
-  innerWall.translate(0, botH / 2, 0);
-  geos.push(innerWall);
+  // Create the plate as a circle with square hole
+  const plateShape = new THREE.Shape();
+  plateShape.absarc(0, 0, innerR, 0, Math.PI * 2, false);
+  const squareHole = new THREE.Path();
+  squareHole.moveTo(-halfH, -halfH);
+  squareHole.lineTo(halfH, -halfH);
+  squareHole.lineTo(halfH, halfH);
+  squareHole.lineTo(-halfH, halfH);
+  squareHole.closePath();
+  plateShape.holes.push(squareHole);
+  const plateGeo = new THREE.ExtrudeGeometry(plateShape, {
+    depth: plateH,
+    bevelEnabled: false,
+  });
+  plateGeo.rotateX(-Math.PI / 2);
+  plateGeo.translate(0, H / 2 - plateH, 0);
+  geos.push(plateGeo);
 
-  // Socket frame walls (4 box sides)
-  const fw = CHERRY_MX.PLATE_HOLE;
-  const fwH = 2.5;
-  const ft = 1.0;
-  const fy = -H / 2 + botH + fwH / 2;
-  for (const [w, d, tx, tz] of [
-    [fw + ft * 2, ft, 0, -(fw / 2 + ft / 2)],
-    [fw + ft * 2, ft, 0, fw / 2 + ft / 2],
-    [ft, fw, -(fw / 2 + ft / 2), 0],
-    [ft, fw, fw / 2 + ft / 2, 0],
-  ] as [number, number, number, number][]) {
-    const box = new THREE.BoxGeometry(w, fwH, d);
-    box.translate(tx, fy, tz);
-    geos.push(box);
-  }
-
-  // Pin cylinders
+  // 4. Pin guide cylinders (solid posts rising from bottom plate)
+  // These have holes for the pins to pass through — for now solid guides
+  const pinGuideH = pocketDepth - plateH - 1.0; // leave gap below plate
   for (const pin of [CHERRY_MX.PIN_1, CHERRY_MX.PIN_2]) {
-    const cyl = new THREE.CylinderGeometry(0.75, 0.75, fwH, 12);
-    cyl.translate(pin.x, fy, pin.y);
+    const cyl = new THREE.CylinderGeometry(pin.diameter / 2 + 0.5, pin.diameter / 2 + 0.5, pinGuideH, 12, 1, false);
+    cyl.translate(pin.x, -H / 2 + botH + pinGuideH / 2, pin.y);
     geos.push(cyl);
   }
+
+  // 5. Center post (alignment peg)
+  const centerH = pocketDepth - plateH - 0.5;
+  const centerCyl = new THREE.CylinderGeometry(
+    CHERRY_MX.CENTER_POST.diameter / 2 + 0.3,
+    CHERRY_MX.CENTER_POST.diameter / 2 + 0.3,
+    centerH, 16, 1, false
+  );
+  centerCyl.translate(0, -H / 2 + botH + centerH / 2, 0);
+  geos.push(centerCyl);
 
   return mergeGeos(geos);
 }
